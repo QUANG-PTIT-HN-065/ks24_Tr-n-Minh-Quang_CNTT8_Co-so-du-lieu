@@ -1,4 +1,4 @@
-
+use Session03;
 /*
 1. Xử lý “bẫy dữ liệu”
 Quantity âm
