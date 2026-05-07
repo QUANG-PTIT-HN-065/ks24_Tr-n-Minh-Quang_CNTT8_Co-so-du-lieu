@@ -5,28 +5,19 @@ Bài 2
 
 1. Phân tích
 
-a. Email cho phép NULL
+Lỗi 1: Sai dấu nháy đơn (Syntax Error)
 
-Không có NOT NULL
-Không có kiểm tra định dạng
+VALUES ('Giao Hàng Nhanh, '0901234567');
+Thiếu dấu ' đóng sau Giao Hàng Nhanh
+Làm sai cú pháp -> hệ thống báo lỗi
 
-Hậu quả: Nhiều khách hàng không có email => hệ thống gửi mail bị crash
+Lỗi 2: Không chỉ định cột khi INSERT
 
-b. Không kiểm soát dữ liệu Age
-
-Không có ràng buộc CHECK
-
-Hậu quả: Có dữ liệu như -5 tuổi → vô lý → lỗi logic hệ thống
-
-c. Thiếu ràng buộc UNIQUE cho Email
-
-Có thể bị trùng email
-
-Hậu quả: Gửi email trùng lặp, Dữ liệu không sạch
-
-d. FullName không có NOT NULL
-
-Có thể bị null => dữ liệu không đầy đủ
+INSERT INTO SHIPPERS
+VALUES ('Viettel Post');
+Bảng có 3 cột: ShipperID, ShipperName, Phone
+Nhưng chỉ truyền 1 giá trị -> lệch dữ liệu
+Kết quả: Phone bị NULL hoặc lỗi
 */
 
 CREATE TABLE SHIPPERS (
