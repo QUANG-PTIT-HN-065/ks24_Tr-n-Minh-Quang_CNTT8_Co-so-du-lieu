@@ -1,91 +1,131 @@
 USE RikkeiClinicDB;
 
--- 1. Phân tích & Giải pháp
--- đề xuất cấu trúc bảng 
-CREATE TABLE Price_Changes_Log (
-    log_id INT AUTO_INCREMENT PRIMARY KEY,
-    medicine_id INT NOT NULL,
-    old_price DECIMAL(18,2) NOT NULL,
-    new_price DECIMAL(18,2) NOT NULL,
-    change_type VARCHAR(20) NOT NULL,
-    difference DECIMAL(18,2) NOT NULL,
-    changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (medicine_id) REFERENCES Medicines(medicine_id)
-);
 /*
-Trigger sử dụng
-Trigger 1: BEFORE UPDATE - Thời điểm chạy trước khi dữ liệu được cập nhật vào bảng Medicines.
+1. Xác định dữ liệu đầu vào và đầu ra
+Dữ liệu đầu vào
 
-Mục đích:
-- Kiểm tra NEW.price.
-- Nếu NEW.price <= 0 thì chặn cập nhật.
+Hệ thống cần nhận:
 
-Trigger 2: AFTER UPDATE - Thời điểm chạy sau khi cập nhật thành công.
+p_patient_id -> Mã bệnh nhân
+p_medicine_id -> Mã thuốc
+p_quantity -> Số lượng cấp phát
 
-Mục đích:
-- So sánh OLD.price và NEW.price.
-- Nếu giá thay đổi thì ghi log.
-- Nếu chỉ cập nhật tên thuốc hoặc tồn kho thì không ghi log.
+=> Đây là các tham số IN.
 
-- Luồng logic 
-NEW.price > OLD.price => Ghi log TĂNG GIÁ, chênh lệch
-NEW.price < OLD.price => Ghi log GIẢM GIÁ, chênh lệch
-NEW.price = OLD.price => không ghi log
-NEW.price <= 0 => Chặn cập nhật và báo lỗi
+Dữ liệu đầu ra
+
+Hệ thống cần trả về:
+
+"Đã cấp phát thành công"
+"Lỗi: Số lượng tồn kho không đủ"
+
+=> Nên sử dụng tham số OUT để trả thông báo trạng thái.
+
+2. Giải pháp kiểm soát giao dịch
+
+Bước 1
+- Bắt đầu transaction bằng: START TRANSACTION;
+Bước 2
+-Kiểm tra số lượng tồn kho hiện tại.
+
+Nếu: Tồn kho < số lượng yêu cầu
+
+=> Báo lỗi: Số lượng tồn kho không đủ
+
+và: ROLLBACK;
+
+Bước 3
+
+Nếu đủ thuốc:
++ Trừ kho thuốc
++ Tính tiền thuốc
++ Cộng vào công nợ bệnh nhân
+
+Bước 4:
+- Nếu toàn bộ thành công: COMMIT;
+
+3. Triển khai 
 */
+
 DELIMITER //
 
-CREATE TRIGGER trg_check_medicine_price
-BEFORE UPDATE ON Medicines
-FOR EACH ROW
+CREATE PROCEDURE DispenseMedicine(
+    IN patientId INT,
+    IN medicineId INT,
+    IN soluong INT,
+    OUT message VARCHAR(255)
+)
 BEGIN
-    IF NEW.price <= 0 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Lỗi: Giá thuốc mới không hợp lệ';
-    END IF;
-END //
 
-CREATE TRIGGER trg_log_medicine_price
-AFTER UPDATE ON Medicines
-FOR EACH ROW
-BEGIN
-    IF OLD.price <> NEW.price THEN
-        INSERT INTO Price_Changes_Log (
-            medicine_id,
-            old_price,
-            new_price,
-            change_type,
-            difference
-        )
-        VALUES (
-            NEW.medicine_id,
-            OLD.price,
-            NEW.price,
-            IF(NEW.price > OLD.price, 'TĂNG GIÁ', 'GIẢM GIÁ'),
-            ABS(NEW.price - OLD.price)
-        );
+    DECLARE slKho INT;
+    DECLARE giaThuoc DECIMAL(18,2);
+    DECLARE tongTien DECIMAL(18,2);
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SET message = 'Lỗi hệ thống';
+    END;
+
+    START TRANSACTION;
+
+    SELECT stock, price
+    INTO slKho, giaThuoc
+    FROM Medicines
+    WHERE medicine_id = medicineId;
+
+    IF slKho < soluong THEN
+
+        ROLLBACK;
+        SET message = 'Lỗi: Số lượng tồn kho không đủ';
+
+    ELSE
+
+        UPDATE Medicines
+        SET stock = stock - soluong
+        WHERE medicine_id = medicineId;
+
+        SET tongTien = giaThuoc * soluong;
+
+        UPDATE Patient_Invoices
+        SET total_due = total_due + tongTien
+        WHERE patient_id = patientId;
+
+        COMMIT;
+
+        SET message = 'Đã cấp phát thành công';
+
     END IF;
+
 END //
 
 DELIMITER ;
 
--- kiểm thử 
--- Tăng giá 
-UPDATE Medicines
-SET price = 18000
+-- TEST
+
+-- TH1: Thành công
+CALL DispenseMedicine(1, 1, 10, @msg);
+
+SELECT @msg;
+
+SELECT * 
+FROM Medicines
 WHERE medicine_id = 1;
 
--- Giảm giá 
-UPDATE Medicines
-SET price = 4000
+SELECT * 
+FROM Patient_Invoices
+WHERE patient_id = 1;
+
+
+-- TH2: Không đủ thuốc
+CALL DispenseMedicine(1, 2, 10, @msg);
+
+SELECT @msg;
+
+SELECT * 
+FROM Medicines
 WHERE medicine_id = 2;
 
--- Cập nhật tồn kho, không sinh log
-UPDATE Medicines
-SET stock = stock + 20
-WHERE medicine_id = 1;
-
--- Giá âm
-UPDATE Medicines
-SET price = -5000
-WHERE medicine_id = 1;
+SELECT * 
+FROM Patient_Invoices
+WHERE patient_id = 1;

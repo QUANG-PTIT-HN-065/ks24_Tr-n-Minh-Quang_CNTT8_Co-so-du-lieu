@@ -1,48 +1,40 @@
 USE RikkeiClinicDB;
 
+/*
+Phần A: Phân tích:
+Việc bệnh nhân bị “mất tích” khỏi hệ thống nội trú đã vi phạm tính Atomicity trong nguyên lý ACID.
+Vì quá trình chuyển giường phải được thực hiện như một giao dịch thống nhất: hoặc hoàn thành cả 2 bước, hoặc phải hoàn tác toàn bộ nếu xảy ra lỗi.
+
+Phần B: Sửa chữa mã nguồn
+*/
+DROP PROCEDURE IF EXISTS TransferBed;
+
 DELIMITER //
 
-CREATE TRIGGER PreventStatusRevert
-BEFORE UPDATE ON Appointments
-FOR EACH ROW
+CREATE PROCEDURE TransferBed(
+    IN p_patient_id INT,
+    IN p_new_bed_id INT
+)
 BEGIN
-    -- Nếu lịch khám đã ở trạng thái Completed thì không cho phép cập nhật nữa
-    IF NEW.status = 'Completed' THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Lỗi: Không được phép thao tác trên lịch khám này!';
-    END IF;
-END //
-DELIMITER ;
-/*
-Phần A: Phân tích lỗi
-1. Câu lệnh UPDATE để tái hiện lỗi
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        
+        SELECT 'Chuyển giường thất bại - dữ liệu đã được hoàn tác'
+        AS message;
+    END;
 
-*/
-UPDATE Appointments
-SET status = 'Completed'
-WHERE appointment_id = 104;
-/*
-2. Giải thích lỗi logic
+    START TRANSACTION;
 
-Phải sử dụng OLD.status vì đây là trạng thái của lịch khám trước khi thực hiện UPDATE.
-Mục tiêu của hệ thống là kiểm tra xem lịch khám đã được hoàn thành (Completed) từ trước hay chưa.
-Nếu đã Completed thì không cho phép chỉnh sửa nữa.
-dùng NEW.status. Điều này khiến hệ thống hiểu sai rằng chỉ cần cập nhật thành 'Completed' là bị chặn, 
- kể cả trường hợp hợp lệ như chuyển từ 'Pending' sang 'Completed'
-*/
+    UPDATE Beds
+    SET patient_id = NULL
+    WHERE patient_id = p_patient_id;
 
-DROP TRIGGER IF EXISTS PreventStatusRevert;
+    UPDATE Beds
+    SET patient_id = p_patient_id
+    WHERE bed_id = p_new_bed_id;
 
-DELIMITER //
-CREATE TRIGGER PreventStatusRevert
-BEFORE UPDATE ON Appointments
-FOR EACH ROW
-BEGIN
-    IF OLD.status = 'Completed' THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Loi: Khong duoc phep thao tac tren lich kham da Completed';
-
-    END IF;
+    COMMIT;
 
 END //
 

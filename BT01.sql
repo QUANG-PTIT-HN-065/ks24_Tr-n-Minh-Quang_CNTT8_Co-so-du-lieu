@@ -167,44 +167,71 @@ INSERT INTO Wallets (patient_id, balance, status) VALUES
 (2, 50000.00, 'Active'),     -- Test Case 3: Cháy ví (Chỉ có 50k, không đủ khám 200k)
 (3, 1000000.00, 'Inactive'); -- Test Case 2: Nhiều tiền nhưng thẻ bị khóa
 
-/*
-Phần A: Phân tích lỗi
-- Câu lệnh UPDATE để tái hiện lỗi
-*/
-UPDATE Appointments
-SET appointment_date = '2025-01-10'
-WHERE appointment_id = 104;
+
+
+-- Phần A: Phân tích lỗi
+-- 1. Gọi thủ tục để tái hiện lỗi
+
+CALL PayHospitalFee(1, 200000);
+
+-- Kiểm tra dữ liệu sau khi lỗi xảy ra
+-- Kiểm tra số dư ví
+SELECT * 
+FROM Wallets
+WHERE patient_id = 1;
+
+-- Kiểm tra công nợ
+SELECT * 
+FROM Patient_Invoices
+WHERE patient_id = 1;
 
 /*
-Giả sử thời điểm hiện tại là năm 2026 thì ngày 2025-01-10 là quá khứ, nhưng trigger cũ vẫn cho phép cập nhật.
+Sự cố này vi phạm tính Atomicity trong nguyên lý ACID.
+Atomicity yêu cầu toàn bộ giao dịch phải được thực hiện như một khối thống nhất:
 
-- Giải thích lỗi logic
-OLD.appointment_date là giá trị lịch khám cũ trước khi UPDATE.
-NEW.appointment_date là giá trị mới mà người dùng muốn cập nhật.
+Hoặc tất cả thao tác cùng thành công
+Hoặc tất cả phải bị hoàn tác nếu có lỗi
 
-Trigger cũ đang kiểm tra:
-
-IF OLD.appointment_date < NOW()
-
-Điều này chỉ kiểm tra lịch cũ có nằm trong quá khứ hay không, thay vì kiểm tra lịch mới người dùng nhập vào.
- Vì vậy nếu lịch cũ ở tương lai thì dù người dùng sửa thành ngày quá khứ, trigger vẫn không chặn được.
-
-Phần B: Sửa chữa mã nguồn
+Trong trường hợp này:
++ Tiền đã bị trừ khỏi ví
++ Nhưng công nợ chưa được cập nhật
+=> Transaction bị thực hiện dang dở.
 */
-DROP TRIGGER IF EXISTS PreventPastAppointments;
 
+-- Sửa chữa mã nguồn
+DROP PROCEDURE IF EXISTS PayHospitalFee;
 DELIMITER //
-CREATE TRIGGER PreventPastAppointments
-BEFORE UPDATE ON Appointments
-FOR EACH ROW
-BEGIN
-    IF NEW.appointment_date < NOW() THEN
-        
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Loi: Khong the dat lich kham vao thoi diem trong qua khu';
 
-    END IF;
+CREATE PROCEDURE PayHospitalFee(
+    IN p_patient_id INT,
+    IN p_amount DECIMAL(18,2)
+)
+BEGIN
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SELECT 'Giao dịch thất bại - dữ liệu đã được hoàn tác' AS message;
+    END;
+
+    START TRANSACTION;
+
+    UPDATE Wallets
+    SET balance = balance - p_amount
+    WHERE patient_id = p_patient_id;
+
+    SIGNAL SQLSTATE '45000'
+    SET MESSAGE_TEXT = 'Lỗi: Hệ thống gặp sự cố mạng đột ngột!';
+
+    UPDATE Patient_Invoices
+    SET total_due = total_due - p_amount
+    WHERE patient_id = p_patient_id;
+
+    COMMIT;
 
 END //
 
 DELIMITER ;
+
+CALL PayHospitalFee(1, 200000);
+

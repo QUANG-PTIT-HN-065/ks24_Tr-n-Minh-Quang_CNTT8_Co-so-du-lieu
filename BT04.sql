@@ -1,82 +1,160 @@
 USE RikkeiClinicDB;
 
 /*
-1. Phân tích
+PHẦN A: PHÂN TÍCH & ĐỀ XUẤT
+1. Định nghĩa Input / Output
+Input
+Procedure cần nhận:
 
-Cần 2 trigger:
-BEFORE INSERT và BEFORE UPDATE trên bảng Appointments
+patientId -> mã bệnh nhân
+soTien -> số tiền thanh toán
 
-Thời điểm kích hoạt: Sử dụng BEFORE để kiểm tra trước khi dữ liệu được ghi vào bảng. Nếu phát hiện trùng lịch thì dùng SIGNAL để chặn giao dịch.
+=> dùng tham số IN
 
-2. Điều kiện kiểm tra trùng lịch
+Output
 
-Một lịch bị xem là trùng khi:
-+ Cùng doctor_id
-+ Cùng appointment_date
-+ status <> 'Cancelled'
+Procedure cần trả:
+Thông báo trạng thái thành công / thất bại
 
-Trigger INSERT:
-WHERE doctor_id = NEW.doctor_id
-  AND appointment_date = NEW.appointment_date
-  AND status <> 'Cancelled'
-  
-Trigger UPDATE
-WHERE doctor_id = NEW.doctor_id
-  AND appointment_date = NEW.appointment_date
-  AND status <> 'Cancelled'
-  AND appointment_id <> OLD.appointment_id
+=> dùng tham số OUT
+
+2. Đề xuất 2 chiến lược xử lý
+Chiến lược 1: Chạy cập nhật trực tiếp + bắt lỗi hệ thống
+
+Cách làm:
++ Chạy luôn lệnh UPDATE ví
++ Chạy UPDATE công nợ
++ Nếu lỗi hệ thống xảy ra thì dùng:
++ ROLLBACK
+
+- Ưu điểm
++ Code ngắn
++ Dễ viết
+
+- Nhược điểm
++ Không kiểm tra dữ liệu trước
++ Có thể bị:
+	+ âm ví
+	+ thanh toán số âm
+	+ dữ liệu sai logic
+    
+Chiến lược 2: Kiểm tra dữ liệu trước rồi mới cho giao dịch chạy
+Cách làm:
++ Kiểm tra:
+	+ số tiền > 0
+    + ví có đủ tiền không
++ Nếu sai:
+	+ rollback
+	+ trả thông báo lỗi
++ Nếu hợp lệ:
+	+ mới update dữ liệu
+    + commit
+    
+- Ưu điểm
+	+ An toàn dữ liệu
+	+ Không âm ví
+	+ Chặn lỗi nghiệp vụ từ đầu
+	+ Đúng quy tắc hệ thống thực tế
+- Nhược điểm
+	+ Code dài hơn
+	+ Nhiều bước hơn
+    
+    
+3. Bảng so sánh 
+| Tiêu chí                 | Chiến lược 1 | Chiến lược 2 |
+| ------------------------ | ------------ | ------------ |
+| Code ngắn                | Có           | Không        |
+| Kiểm tra số dư           | Không        | Có           |
+| Chặn thanh toán âm       | Không        | Có           |
+| Độ an toàn dữ liệu       | Trung bình   | Cao          |
+| Phù hợp hệ thống thực tế | Không        | Có           |
+
+4. Lựa chọn giải pháp
+
+Chọn Chiến lược 2 Vì:
+- kiểm soát dữ liệu tốt hơn
+- tránh âm ví
+- tránh thanh toán sai
+- đảm bảo tính toàn vẹn dữ liệu
+
+PHẦN B: THIẾT KẾ & TRIỂN KHAI
+1. Thiết kế luồng xử lý
+- Bước 1:
+	+ Bắt đầu transaction: START TRANSACTION;
+- Bước 2: 
+    + Lấy số dư ví hiện tại
+- Bước 3:
+	+ Kiểm tra: số tiền có > 0 không => ví có đủ tiền không
+	+ Nếu sai: ROLLBACK và trả thông báo lỗi.
+- Bước 4:
+	+ Nếu hợp lệ: trừ tiền ví ,giảm công nợ
+- Bước 5
+    + Hoàn tất giao dịch COMMIT
 */
+
 DELIMITER //
 
-CREATE TRIGGER trg_check_doctor_schedule_insert
-BEFORE INSERT ON Appointments
-FOR EACH ROW
+CREATE PROCEDURE PayFee(
+    IN patientId INT,
+    IN soTien DECIMAL(18,2),
+    OUT message VARCHAR(255)
+)
 BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM Appointments
-        WHERE doctor_id = NEW.doctor_id
-          AND appointment_date = NEW.appointment_date
-          AND status <> 'Cancelled'
-    ) THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Lỗi: Bác sĩ đã có lịch hẹn vào khung giờ này';
-    END IF;
-END //
 
-CREATE TRIGGER trg_check_doctor_schedule_update
-BEFORE UPDATE ON Appointments
-FOR EACH ROW
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM Appointments
-        WHERE doctor_id = NEW.doctor_id
-          AND appointment_date = NEW.appointment_date
-          AND status <> 'Cancelled'
-          AND appointment_id <> OLD.appointment_id
-    ) THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Lỗi: Bác sĩ đã có lịch hẹn vào khung giờ này';
+    DECLARE soDu DECIMAL(18,2);
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SET message = 'Lỗi hệ thống';
+    END;
+
+    START TRANSACTION;
+
+    SELECT balance
+    INTO soDu
+    FROM Wallets
+    WHERE patient_id = patientId;
+
+    IF soTien <= 0 THEN
+
+        ROLLBACK;
+        SET message = 'Số tiền không hợp lệ';
+
+    ELSEIF soDu < soTien THEN
+
+        ROLLBACK;
+        SET message = 'Ví không đủ tiền';
+
+    ELSE
+
+        UPDATE Wallets
+        SET balance = balance - soTien
+        WHERE patient_id = patientId;
+
+        UPDATE Patient_Invoices
+        SET total_due = total_due - soTien
+        WHERE patient_id = patientId;
+
+        COMMIT;
+
+        SET message = 'Thanh toán thành công';
+
     END IF;
+
 END //
 
 DELIMITER ;
 
--- kiểm thử 
--- Lịch mới đưa vào khung giờ hoàn toàn trống →  Thành công.
-INSERT INTO Appointments (appointment_id,patient_id,doctor_id,appointment_date,status) VALUES 
-(107,1,101,'2026-06-11 08:00:00','Pending');
+-- Kiểm thử
+-- TH1: Thanh toán hợp lệ
+CALL PayFee(1, 100000, @msg);
+SELECT @msg;
 
--- Lịch mới đưa vào khung giờ đang có ca 'Pending' →  Bị chặn & Báo lỗi.
-INSERT INTO Appointments (appointment_id,patient_id,doctor_id,appointment_date,status) VALUES 
-(108,2,101,'2026-06-10 08:30:00','Pending');
+-- TH2: Ví không đủ tiền
 
--- Lịch mới đưa vào khung giờ đang có ca 'Cancelled' →  Thành công.
-INSERT INTO Appointments (appointment_id,patient_id,doctor_id,appointment_date,status) VALUES 
-(109,2,101,'2026-05-02 10:00:00','Pending');
+CALL PayFee(2, 200000, @msg);
+SELECT @msg;
 
--- Cập nhật trạng thái một ca khám từ 'Pending' sang 'Completed' →  Thành công
-UPDATE Appointments
-SET status = 'Completed'
-WHERE appointment_id = 104;
+-- TH3: Truyền số âm
+CALL PayFee(1, -50000, @msg);
+SELECT @msg;
